@@ -1,0 +1,14 @@
+# pip install volcengine-python-sdk
+
+flask==2.0.1
+flask-cors==3.0.10
+azure-cognitiveservices-speech==1.42.0
+volcenginesdkarkruntime==1.0.12
+requests==2.28.1
+pydantic==1.10.7
+
+# curl -X POST http://localhost:31415/start
+# curl http://localhost:31415/status
+# curl http://localhost:31415/results
+# curl "http://localhost:31415/wait-result?timeout=10"
+# curl -X POST http://localhost:31415/stop

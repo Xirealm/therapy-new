@@ -1,0 +1,148 @@
+#!/bin/bash
+
+# 确保tmux已安装
+command -v tmux >/dev/null 2>&1 || { echo "需要安装tmux。请运行: brew install tmux"; exit 1; }
+
+# 检查是否已经存在名为therapy_assistant的tmux会话
+if tmux has-session -t therapy_assistant 2>/dev/null; then
+    echo "检测到已有名为therapy_assistant的tmux会话，正在关闭..."
+    tmux kill-session -t therapy_assistant
+fi
+# 创建一个新的tmux会话
+tmux new-session -d -s therapy_assistant
+
+# 关闭可能占用端口的程序
+tmux send-keys -t therapy_assistant "python close.py && echo 'PORT_CLOSED'" C-m
+
+# 等待close.py执行完成
+echo "等待端口释放..."
+while true; do
+  if tmux capture-pane -pt therapy_assistant | grep -q "PORT_CLOSED"; then
+    echo "端口已成功释放"
+    break
+  fi
+  sleep 1
+done
+
+sleep 5
+
+# 创建窗口并运行app.py
+tmux new-window -t therapy_assistant:1 -n "app"
+# tmux send-keys -t therapy_assistant:1 "conda activate psy" C-m
+tmux send-keys -t therapy_assistant:1 "python src/backend/app.py" C-m
+
+# 创建窗口并运行main.py
+tmux new-window -t therapy_assistant:2 -n "main"
+# tmux send-keys -t therapy_assistant:2 "conda activate psy" C-m
+tmux send-keys -t therapy_assistant:2 "python src/main.py" C-m
+
+# 创建窗口并运行npm
+tmux new-window -t therapy_assistant:3 -n "frontend"
+tmux send-keys -t therapy_assistant:3 "npm start" C-m
+
+# 确认语音识别服务可用
+echo "验证语音识别服务可用..."
+MAX_HEALTH_RETRIES=5
+HEALTH_RETRY_COUNT=0
+
+while [ $HEALTH_RETRY_COUNT -lt $MAX_HEALTH_RETRIES ]; do
+  if curl -s -o /dev/null -w "%{http_code}" http://localhost:31415/health 2>/dev/null | grep -q "200"; then
+    echo "语音识别服务健康检查通过"
+    break
+  else
+    HEALTH_RETRY_COUNT=$((HEALTH_RETRY_COUNT+1))
+    echo "健康检查失败，等待服务完全启动 ($HEALTH_RETRY_COUNT/$MAX_HEALTH_RETRIES)..."
+    sleep 2
+  fi
+done
+
+if [ $HEALTH_RETRY_COUNT -eq $MAX_HEALTH_RETRIES ]; then
+  echo "⚠️ 无法确认语音识别服务状态，但将继续启动流程"
+fi
+
+# # 等待WebSocket服务启动 (检查main.py的日志)
+# echo "等待WebSocket服务启动..."
+# while true; do
+#   if grep -q "Running on http" /tmp/main_log.txt 2>/dev/null || grep -q "Application startup complete" /tmp/main_log.txt 2>/dev/null; then
+#     echo "WebSocket服务已启动成功"
+#     break
+#   fi
+#   sleep 1
+# done
+
+# # 等待WebSocket服务启动 (检查main.py的日志)
+# echo "等待WebSocket服务启动..."
+# while true; do
+#   if grep -q "Uvicorn running on" /tmp/main_log.txt 2>/dev/null || grep -q "Uvicorn running" /tmp/main_log.txt 2>/dev/null || grep -q "Started server process" /tmp/main_log.txt 2>/dev/null; then
+#     echo "WebSocket服务已启动成功"
+#     break
+#   fi
+#   sleep 1
+# done
+
+# 再额外等待确保服务真正就绪
+echo "服务启动中，请稍等..."
+sleep 5
+
+# 增加健康检查，确认服务确实可以响应
+echo "执行健康检查..."
+MAX_RETRIES=5
+RETRY_COUNT=0
+SUCCESS=false
+
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:31415/health 2>/dev/null)
+  
+  if [ "$HTTP_CODE" = "200" ]; then
+    echo "✅ 语音识别服务健康检查通过"
+    SUCCESS=true
+    break
+  else
+    RETRY_COUNT=$((RETRY_COUNT+1))
+    echo "⏳ 健康检查失败，5秒后重试 ($RETRY_COUNT/$MAX_RETRIES)..."
+    sleep 5
+  fi
+done
+
+if [ "$SUCCESS" = "false" ]; then
+  echo "⚠️ 健康检查失败多次，但仍将尝试启动服务"
+fi
+
+# 发送启动请求 - 增加重试机制
+tmux new-window -t therapy_assistant:4 -n "control"
+tmux send-keys -t therapy_assistant:4 "echo '尝试启动语音识别...'" C-m
+
+echo "正在启动语音识别服务..."
+MAX_START_RETRIES=5
+START_RETRY_COUNT=0
+START_SUCCESS=false
+
+while [ $START_RETRY_COUNT -lt $MAX_START_RETRIES ]; do
+  START_RESPONSE=$(curl -s -X POST http://localhost:31415/start 2>/dev/null)
+  
+  if [[ "$START_RESPONSE" == *"status"* && "$START_RESPONSE" == *"started"* ]]; then
+    echo "✅ 语音识别服务启动成功"
+    START_SUCCESS=true
+    tmux send-keys -t therapy_assistant:4 "echo '✅ 语音识别服务启动成功'" C-m
+    tmux send-keys -t therapy_assistant:4 "echo '$START_RESPONSE'" C-m
+    break
+  else
+    START_RETRY_COUNT=$((START_RETRY_COUNT+1))
+    echo "⏳ 启动请求失败，5秒后重试 ($START_RETRY_COUNT/$MAX_START_RETRIES)..."
+    tmux send-keys -t therapy_assistant:4 "echo '⏳ 启动请求失败，5秒后重试 ($START_RETRY_COUNT/$MAX_START_RETRIES)...'" C-m
+    sleep 5
+  fi
+done
+
+if [ "$START_SUCCESS" = "false" ]; then
+  echo "⚠️ 多次尝试后无法启动语音识别服务"
+  tmux send-keys -t therapy_assistant:4 "echo '⚠️ 多次尝试后无法启动语音识别服务'" C-m
+fi
+
+# 附加到tmux会话
+echo "所有服务已在tmux会话中启动"
+echo "请运行 'tmux attach -t therapy_assistant' 连接到会话"
+echo "在tmux中，使用Ctrl+B然后按数字键1-4切换不同窗口"
+echo "使用Ctrl+B然后按D可以分离会话（程序继续在后台运行）"
+
+tmux attach -t therapy_assistant
